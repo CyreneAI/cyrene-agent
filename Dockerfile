@@ -1,4 +1,4 @@
-FROM base-mcp:latest
+FROM ghcr.io/cyreneai/base-mcp:latest
 
 WORKDIR /app
 
