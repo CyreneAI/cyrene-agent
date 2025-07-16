@@ -1,7 +1,7 @@
 ````markdown
-# 🧠 Cyrene Agent (bot-api)
+# 🧠 Cyrene Agent (agent-api)
 
-This repository contains the core bot-api service of the Multi-Agent Bot system. It acts as the central brain, responsible for managing AI agents, orchestrating their interactions with Large Language Models (LLMs) and various tools, and handling communication with external platforms via specialized MCP (Multi-Channel Platform) servers.
+This repository contains the core agent-api service of the Multi-Agent Bot system. It acts as the central brain, responsible for managing AI agents, orchestrating their interactions with Large Language Models (LLMs) and various tools, and handling communication with external platforms via specialized MCP (Multi-Channel Platform) servers.
 
 ## ✨ Features
 
