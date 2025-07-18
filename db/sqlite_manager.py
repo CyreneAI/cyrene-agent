@@ -5,7 +5,7 @@ import uuid
 import asyncio # Import asyncio for running blocking operations in a thread
 from typing import List, Optional, Any
 
-from bot.models.agent_config import AgentConfig, AgentSecrets # Import Pydantic models
+from models.agent_config import AgentConfig, AgentSecrets # Import Pydantic models
 from pydantic import ValidationError # For error handling during parsing
 
 logger = logging.getLogger(__name__)

@@ -1,14 +1,16 @@
 import logging
-from typing import Any, Dict, Tuple, Optional
+import os # Added for os.getenv
+import asyncio # Added for asyncio.sleep
+from typing import Any, Dict, Tuple, Optional, List # Added List for type hinting
 from pydantic import Field, PrivateAttr
 
 from langchain_groq import ChatGroq
 from langchain.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from bot.models.agent_config import AgentConfig
-from bot.prompts import AGENT_SYSTEM_PROMPT
-from bot.langgraph_agents.custom_tool_agent import create_custom_tool_agent
+from models.agent_config import AgentConfig
+from prompts import AGENT_SYSTEM_PROMPT
+from langgraph_agents.custom_tool_agent import create_custom_tool_agent
 
 logger = logging.getLogger(__name__)
 
@@ -128,14 +130,19 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
         groq_api_key=agent_config.secrets.groq_api_key
     )
     logger.info(f"✅ Initialized Groq LLM for agent '{agent_name}' with llama3-8b-8192")
-
-    mcp_base_url_prefix = "http://localhost:900" if local_mode else "http://"
-    mcp_suffix = "/mcp/" if local_mode else "/mcp"
+    
+    # Helper function to get the correct URL based on local_mode
+    def get_mcp_url(service_name: str, port: int, local_mode: bool) -> str:
+        if local_mode:
+            return f"http://localhost:{port}/mcp/"
+        else:
+            # For Docker Compose, the service name is the hostname
+            return f"http://{service_name}:{port}/mcp/"
 
     agent_mcp_config = {
-        "multi_search": {"url": f"{mcp_base_url_prefix}0{mcp_suffix}", "transport": "streamable_http"},
-        "finance": {"url": f"{mcp_base_url_prefix}1{mcp_suffix}", "transport": "streamable_http"},
-        "rag": {"url": f"{mcp_base_url_prefix}2{mcp_suffix}", "transport": "streamable_http"},
+        "websearch": {"url": get_mcp_url("web-mcp", 9000, local_mode), "transport": "streamable_http"},
+        "finance": {"url": get_mcp_url("finance-mcp", 9001, local_mode), "transport": "streamable_http"},
+        "rag": {"url": get_mcp_url("rag-mcp", 9002, local_mode), "transport": "streamable_http"},
     }
 
     discord_bot_id = None
@@ -144,7 +151,7 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
     # Check for Discord secrets and add Discord MCP if present
     discord_secrets_provided = bool(agent_config.secrets.discord_bot_token)
     if discord_secrets_provided:
-        agent_mcp_config["discord"] = {"url": f"{mcp_base_url_prefix}4{mcp_suffix}", "transport": "streamable_http"}
+        agent_mcp_config["discord"] = {"url": get_mcp_url("discord-mcp", 9004, local_mode), "transport": "streamable_http"}
         logger.info(f"Agent '{agent_name}' will include Discord tools.")
     else:
         logger.info(f"Agent '{agent_name}' does not have Discord bot token. Discord tools will NOT be enabled.")
@@ -152,11 +159,11 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
     # Check for Telegram secrets and add Telegram MCP if present
     telegram_secrets_provided = (
         agent_config.secrets.telegram_bot_token and
-        agent_config.secrets.telegram_api_id and
+        agent_config.secrets.telegram_api_id is not None and # Ensure it's not None
         agent_config.secrets.telegram_api_hash
     )
     if telegram_secrets_provided:
-        agent_mcp_config["telegram"] = {"url": f"{mcp_base_url_prefix}3{mcp_suffix}", "transport": "streamable_http"}
+        agent_mcp_config["telegram"] = {"url": get_mcp_url("telegram-mcp", 9003, local_mode), "transport": "streamable_http"}
         logger.info(f"Agent '{agent_name}' will include Telegram tools.")
     else:
         if agent_config.secrets.telegram_bot_token:
@@ -169,77 +176,107 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
     agent_tools_raw = []
     agent_tools_final = []
 
-    logger.info(f"Attempt 1/15: Loading tools for agent '{agent_name}' from MCP servers at {list(agent_mcp_config.keys())}...")
-    try:
-        fetched_tools_list = await mcp_client.get_tools()
-        if fetched_tools_list:
-            agent_tools_raw = list(fetched_tools_list)
-            
-            # First, handle Discord bot registration if token is provided
-            if discord_secrets_provided:
-                register_discord_tool = next((t for t in agent_tools_raw if t.name == "register_discord_bot"), None)
-                if register_discord_tool:
-                    try:
-                        logger.info(f"Calling 'register_discord_bot' for agent '{agent_name}' with token (first 5 chars): {agent_config.secrets.discord_bot_token[:5]}...")
-                        # The register_discord_bot tool returns the bot_id
-                        discord_bot_id = await register_discord_tool.ainvoke({"bot_token": agent_config.secrets.discord_bot_token})
-                        logger.info(f"Successfully registered Discord bot for agent '{agent_name}'. Bot ID: {discord_bot_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to register Discord bot for agent '{agent_name}': {e}", exc_info=True)
-                        discord_bot_id = None # Ensure it's None if registration fails
-                else:
-                    logger.warning(f"Agent '{agent_name}' has Discord token but 'register_discord_bot' tool not found. Discord tools will NOT be enabled.")
-            
-            # Now, process and wrap all tools
-            for tool in agent_tools_raw:
-                if telegram_secrets_provided and tool.name in ["send_message_telegram", "get_chat_history", "get_bot_id_telegram"]:
-                    logger.debug(f"Wrapping Telegram tool '{tool.name}' for agent '{agent_name}'.")
-                    try:
-                        telegram_api_id_int = int(agent_config.secrets.telegram_api_id)
-                    except ValueError:
-                        logger.error(f"Invalid telegram_api_id for agent '{agent_name}': {agent_config.secrets.telegram_api_id}. Skipping Telegram tool wrapping.")
-                        agent_tools_final.append(tool)
-                        mcp_client.tools[tool.name] = tool
-                        continue
-
-                    wrapped_tool = TelegramToolWrapper(
-                        wrapped_tool=tool,
-                        telegram_api_id=telegram_api_id_int,
-                        telegram_api_hash=agent_config.secrets.telegram_api_hash,
-                        telegram_bot_token=agent_config.secrets.telegram_bot_token
-                    )
-                    agent_tools_final.append(wrapped_tool)
-                    mcp_client.tools[wrapped_tool.name] = wrapped_tool 
-                
-                elif discord_bot_id and tool.name in ["send_message", "get_channel_messages", "get_bot_id"]:
-                    logger.debug(f"Wrapping Discord tool '{tool.name}' for agent '{agent_name}' with bot ID: {discord_bot_id}.")
-                    wrapped_tool = DiscordToolWrapper(
-                        wrapped_tool=tool,
-                        bot_id=discord_bot_id
-                    )
-                    agent_tools_final.append(wrapped_tool)
-                    mcp_client.tools[wrapped_tool.name] = wrapped_tool
-                
-                else:
-                    agent_tools_final.append(tool)
-                    mcp_client.tools[tool.name] = tool
-            
-            if telegram_secrets_provided and "telegram" in agent_mcp_config:
-                get_telegram_bot_id_tool = mcp_client.tools.get("get_bot_id_telegram")
-                if get_telegram_bot_id_tool:
-                    try:
-                        telegram_bot_id = await get_telegram_bot_id_tool.ainvoke({})
-                        logger.info(f"Fetched Telegram Bot ID for agent '{agent_name}': {telegram_bot_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch Telegram Bot ID for agent '{agent_name}': {e}", exc_info=True)
-
-        else:
-            logger.warning(f"No tools fetched for agent '{agent_name}'. This might mean configured MCP servers are down or no tools are exposed for configured services.")
-    except Exception as e:
-        logger.error(f"Error loading tools for agent '{agent_name}': {e}", exc_info=True)
-        if not hasattr(mcp_client, 'tools'):
-            mcp_client.tools = {}
+    # --- Robust Retry Logic for MCP Tools Loading ---
+    max_retries = 15
+    retry_delay_seconds = 1
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"Attempt {attempt}/{max_retries}: Loading tools for agent '{agent_name}' from MCP servers at {list(agent_mcp_config.keys())}...")
+        try:
+            fetched_tools_list = await mcp_client.get_tools()
+            if fetched_tools_list:
+                agent_tools_raw = list(fetched_tools_list)
+                logger.info(f"Successfully fetched tools on attempt {attempt}.")
+                break # Exit retry loop on success
+            else:
+                logger.warning(f"No tools fetched on attempt {attempt}. Retrying...")
+        except ExceptionGroup as eg: # Catch ExceptionGroup specifically
+            logger.error(f"Error loading tools for agent '{agent_name}' on attempt {attempt}: {eg}", exc_info=True)
+            # You can inspect eg.exceptions here if needed for more granular logging
+            if attempt < max_retries:
+                logger.info(f"Waiting {retry_delay_seconds} seconds before retrying...")
+                await asyncio.sleep(retry_delay_seconds)
+            else:
+                logger.error(f"Failed to load tools after {max_retries} attempts.")
+                if not hasattr(mcp_client, 'tools'):
+                    mcp_client.tools = {}
+                agent_tools_final = []
+                # Re-raise the ExceptionGroup if all retries failed
+                raise eg 
+        except Exception as e: # Catch any other unexpected exceptions
+            logger.error(f"Unexpected error loading tools for agent '{agent_name}' on attempt {attempt}: {e}", exc_info=True)
+            if attempt < max_retries:
+                logger.info(f"Waiting {retry_delay_seconds} seconds before retrying...")
+                await asyncio.sleep(retry_delay_seconds)
+            else:
+                logger.error(f"Failed to load tools after {max_retries} attempts due to unexpected error.")
+                if not hasattr(mcp_client, 'tools'):
+                    mcp_client.tools = {}
+                agent_tools_final = []
+                raise # Re-raise the unexpected exception
+    
+    # If tools were not fetched after all retries, ensure agent_tools_final is empty
+    if not agent_tools_raw:
         agent_tools_final = []
+    else:
+        # Continue with tool processing if tools were fetched
+        # First, handle Discord bot registration if token is provided
+        if discord_secrets_provided:
+            register_discord_tool = next((t for t in agent_tools_raw if t.name == "register_discord_bot"), None)
+            if register_discord_tool:
+                try:
+                    logger.info(f"Calling 'register_discord_bot' for agent '{agent_name}' with token (first 5 chars): {agent_config.secrets.discord_bot_token[:5]}...")
+                    # The register_discord_bot tool returns the bot_id
+                    discord_bot_id = await register_discord_tool.ainvoke({"bot_token": agent_config.secrets.discord_bot_token})
+                    logger.info(f"Successfully registered Discord bot for agent '{agent_name}'. Bot ID: {discord_bot_id}")
+                except Exception as e:
+                    logger.error(f"Failed to register Discord bot for agent '{agent_name}': {e}", exc_info=True)
+                    discord_bot_id = None # Ensure it's None if registration fails
+            else:
+                logger.warning(f"Agent '{agent_name}' has Discord token but 'register_discord_bot' tool not found. Discord tools will NOT be enabled.")
+        
+        # Now, process and wrap all tools
+        for tool_item in agent_tools_raw:
+            if telegram_secrets_provided and tool_item.name in ["send_message_telegram", "get_chat_history", "get_bot_id_telegram"]:
+                logger.debug(f"Wrapping Telegram tool '{tool_item.name}' for agent '{agent_name}'.")
+                try:
+                    telegram_api_id_int = int(agent_config.secrets.telegram_api_id)
+                except (ValueError, TypeError):
+                    logger.error(f"Invalid or missing telegram_api_id for agent '{agent_name}': {agent_config.secrets.telegram_api_id}. Skipping Telegram tool wrapping.")
+                    agent_tools_final.append(tool_item)
+                    mcp_client.tools[tool_item.name] = tool_item
+                    continue
+
+                wrapped_tool = TelegramToolWrapper(
+                    wrapped_tool=tool_item,
+                    telegram_api_id=telegram_api_id_int,
+                    telegram_api_hash=agent_config.secrets.telegram_api_hash,
+                    telegram_bot_token=agent_config.secrets.telegram_bot_token
+                )
+                agent_tools_final.append(wrapped_tool)
+                mcp_client.tools[wrapped_tool.name] = wrapped_tool 
+            
+            elif discord_bot_id and tool_item.name in ["send_message", "get_channel_messages", "get_bot_id"]:
+                logger.debug(f"Wrapping Discord tool '{tool_item.name}' for agent '{agent_name}' with bot ID: {discord_bot_id}.")
+                wrapped_tool = DiscordToolWrapper(
+                    wrapped_tool=tool_item,
+                    bot_id=discord_bot_id
+                )
+                agent_tools_final.append(wrapped_tool)
+                mcp_client.tools[wrapped_tool.name] = wrapped_tool
+            
+            else:
+                agent_tools_final.append(tool_item)
+                mcp_client.tools[tool_item.name] = tool_item
+        
+        if telegram_secrets_provided and "telegram" in agent_mcp_config:
+            get_telegram_bot_id_tool = mcp_client.tools.get("get_bot_id_telegram")
+            if get_telegram_bot_id_tool:
+                try:
+                    telegram_bot_id = await get_telegram_bot_id_tool.ainvoke({})
+                    logger.info(f"Fetched Telegram Bot ID for agent '{agent_name}': {telegram_bot_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch Telegram Bot ID for agent '{agent_name}': {e}", exc_info=True)
+        
 
     logger.info(f"🔧 Loaded {len(agent_tools_final)} tools for agent '{agent_name}'. Tools found: {[t.name for t in agent_tools_final]}.")
     logger.info(f"Final number of tools obtained for agent '{agent_name}': {len(agent_tools_final)}")
@@ -257,4 +294,3 @@ async def create_dynamic_agent_instance(agent_config: AgentConfig, local_mode: b
 
     logger.info(f"🧠 Agent: {agent_name} (ID: {agent_id}) initialized as a custom LangGraph agent with {len(agent_tools_final)} tools.")
     return agent_executor, mcp_client, discord_bot_id, telegram_bot_id
-

@@ -8,14 +8,13 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
 # Import from new modules
-from bot.models.agent_config import AgentConfig
-from bot.db import sqlite_manager
-from bot.core import agent_manager
-from bot.prompts import AGENT_SYSTEM_PROMPT
+from models.agent_config import AgentConfig
+from db import sqlite_manager
+from core import agent_manager
+from prompts import AGENT_SYSTEM_PROMPT
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 
@@ -58,7 +57,7 @@ async def lifespan(app: FastAPI):
     logger.info("Agent app startup: Initializing global resources...")
     
     # Initialize SQLite Manager instance
-    db_path = os.getenv("SQLITE_DB_PATH", "agents.db")
+    db_path = os.getenv("SQLITE_DB_PATH", "/app/data/agents.db")
     app.state.db_manager = sqlite_manager.SQLiteManager(db_path) # Instantiate the class
     # The database initialization (init_db) is now handled automatically within the SQLiteManager's __init__
     logger.info(f"SQLite database '{db_path}' initialized by SQLiteManager.")
