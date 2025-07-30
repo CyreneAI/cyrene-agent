@@ -9,11 +9,11 @@ from pydantic import Field, PrivateAttr
 from langchain.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
-from bot.models.agent_config import AgentConfig, AgentSecrets, Settings 
-from bot.prompts import AGENT_SYSTEM_PROMPT
-from bot.langgraph_agents.custom_tool_agent import create_custom_tool_agent
-from bot.llm_factory import create_llm 
-from bot.db.sqlite_manager import SQLiteManager
+from models.agent_config import AgentConfig, AgentSecrets, Settings 
+from prompts import AGENT_SYSTEM_PROMPT
+from langgraph_agents.custom_tool_agent import create_custom_tool_agent
+from llm_factory import create_llm 
+from db.sqlite_manager import SQLiteManager
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,6 @@ def _load_default_agent_config_from_file() -> Optional[AgentConfig]:
             logger.error(f"Could not load data from {DEFAULT_CHARACTER_CONFIG_PATH} with utf-8 or latin-1 encoding.")
             return None
 
-        # Extract data for nested models
         settings_data = config_data.get("settings", {})
         secrets_from_json = settings_data.get("secrets", {})
         logger.debug(f"[_load_default_agent_config_from_file] Raw secrets from JSON: {secrets_from_json}")
@@ -52,7 +51,6 @@ def _load_default_agent_config_from_file() -> Optional[AgentConfig]:
         voice_settings = settings_data.get("voice", {})
 
         # --- SIMPLIFIED SECRET PARSING ---
-        # Directly pass the secrets_from_json dict to AgentSecrets Pydantic model
         agent_secrets_instance = AgentSecrets(**secrets_from_json)
         logger.debug(f"[_load_default_agent_config_from_file] Parsed AgentSecrets: {agent_secrets_instance.model_dump_json(exclude_none=True)}")
 
@@ -174,7 +172,7 @@ class AgentManager:
         self.db_manager = SQLiteManager(db_path) 
 
     def add_initialized_agent(self, agent_id: str, agent_name: str, executor: Any, mcp_client: MultiServerMCPClient, 
-                              discord_bot_id: Optional[str] = None, telegram_bot_id: Optional[str] = None):
+                             discord_bot_id: Optional[str] = None, telegram_bot_id: Optional[str] = None):
         """Adds an initialized agent, its MCP client, and platform-specific bot IDs to the cache."""
         agent_info = {
             "name": agent_name,
@@ -236,7 +234,6 @@ class AgentManager:
                 logger.error("Could not load or create a default agent configuration. No agents will be initialized.")
                 return 
             
-        # The loop below should now correctly process configs retrieved from the DB
         for config in existing_configs:
             try:
                 if not config.id:
@@ -275,7 +272,7 @@ class AgentManager:
         llm_secrets = agent_config.settings.secrets 
 
         agent_bio = agent_config.bio
-        agent_persona = agent_config.system
+        agent_persona = agent_config.system 
         agent_knowledge = agent_config.knowledge 
         agent_lore = agent_config.lore 
         agent_style = agent_config.style 
@@ -307,6 +304,7 @@ class AgentManager:
             logger.error(f"Failed to initialize LLM for agent '{agent_name}': {e}", exc_info=True)
             raise 
 
+        # --- MCP Server Configuration (using Docker Compose service names for non-local) ---
         agent_mcp_config = {
             "multi_search": {"url": "http://localhost:9000/mcp/", "transport": "streamable_http"}, 
             "finance": {"url": "http://localhost:9001/mcp/", "transport": "streamable_http"}, 
@@ -316,7 +314,7 @@ class AgentManager:
         if not local_mode:
             agent_mcp_config["multi_search"]["url"] = "http://web-mcp:9000/mcp/"
             agent_mcp_config["finance"]["url"] = "http://finance-mcp:9000/mcp/"
-            agent_mcp_config["rag"]["url"] = "http://rag-mcp-svc:9000/mcp/"
+            agent_mcp_config["rag"]["url"] = "http://rag-mcp:9000/mcp/"
 
 
         discord_bot_id = None
@@ -360,25 +358,33 @@ class AgentManager:
         agent_tools_final = []
 
         logger.info(f"Attempting to load tools for agent '{agent_name}' from MCP servers: {list(agent_mcp_config.keys())}...")
-        try:
-            for attempt in range(1, 4): 
-                try:
-                    fetched_tools_list = await mcp_client.get_tools()
-                    if fetched_tools_list:
-                        agent_tools_raw = list(fetched_tools_list)
-                        logger.info(f"Successfully fetched {len(agent_tools_raw)} raw tools on attempt {attempt}.")
-                        break 
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt} failed to fetch tools for agent '{agent_name}': {e}")
-                    if attempt < 3:
-                        await asyncio.sleep(2 ** attempt) 
-            else: 
-                logger.error(f"Failed to fetch tools for agent '{agent_name}' after multiple attempts. Configured MCP servers might be down or inaccessible.")
-                if not hasattr(mcp_client, 'tools'):
-                    mcp_client.tools = {}
-                agent_tools_final = []
+        
+        # --- RETRY MECHANISM ---
+        max_attempts = 12  
+        base_delay = 2    
+        for attempt in range(1, max_attempts + 1): 
+            try:
+                fetched_tools_list = await mcp_client.get_tools()
+                if fetched_tools_list:
+                    agent_tools_raw = list(fetched_tools_list)
+                    logger.info(f"Successfully fetched {len(agent_tools_raw)} raw tools on attempt {attempt}.")
+                    break 
+            except Exception as e:
+                logger.warning(f"Attempt {attempt}/{max_attempts} failed to fetch tools for agent '{agent_name}': {e}")
+                if attempt < max_attempts:
+                    delay = base_delay * (2 ** (attempt - 1)) 
+                    logger.info(f"Retrying in {delay} seconds...")
+                    await asyncio.sleep(delay)
+                else: 
+                    logger.error(f"Failed to fetch tools for agent '{agent_name}' after {max_attempts} attempts. Configured MCP servers might be down or inaccessible.")
+                    # Ensure mcp_client.tools is initialized even if tool fetching fails completely
+                    if not hasattr(mcp_client, 'tools'):
+                        mcp_client.tools = {}
+                    agent_tools_final = [] 
+                    raise 
 
-            if discord_secrets_provided and agent_tools_raw:
+        if agent_tools_raw:
+            if discord_secrets_provided:
                 register_discord_tool = next((t for t in agent_tools_raw if t.name == "register_discord_bot"), None)
                 if register_discord_tool:
                     try:
@@ -390,18 +396,20 @@ class AgentManager:
                         discord_bot_id = None 
                 else:
                     logger.warning(f"Agent '{agent_name}' has Discord token but 'register_discord_bot' tool not found. Discord tools will NOT be enabled.")
-            
+                
             for tool_item in agent_tools_raw: 
                 if telegram_secrets_provided and tool_item.name in ["send_message_telegram", "get_chat_history", "get_bot_id_telegram"]:
                     logger.debug(f"Wrapping Telegram tool '{tool_item.name}' for agent '{agent_name}'.")
                     try:
-                        # Ensure telegram_api_id is an integer for the wrapper
-                        telegram_api_id_int = int(telegram_api_id) if telegram_api_id is not None else 0 # Default to 0 if None
+
+                        telegram_api_id_int = int(telegram_api_id) if telegram_api_id is not None else 0 
                     except (ValueError, TypeError): 
                         logger.error(f"Invalid or missing telegram_api_id for agent '{agent_name}': {telegram_api_id}. Skipping Telegram tool wrapping.")
-                        agent_tools_final.append(tool_item)
-                        mcp_client.tools[tool_item.name] = tool_item
-                        continue
+                        # If conversion fails, don't wrap, just add the raw tool if it's not a bot tool
+                        if tool_item.name not in ["send_message_telegram", "get_chat_history", "get_bot_id_telegram"]:
+                             agent_tools_final.append(tool_item)
+                             mcp_client.tools[tool_item.name] = tool_item
+                        continue 
 
                     wrapped_tool = TelegramToolWrapper(
                         wrapped_tool=tool_item,
@@ -424,25 +432,12 @@ class AgentManager:
                 else:
                     agent_tools_final.append(tool_item)
                     mcp_client.tools[tool_item.name] = tool_item
-            
-            if telegram_secrets_provided and "telegram" in agent_mcp_config: 
-                get_telegram_bot_id_tool = mcp_client.tools.get("get_bot_id_telegram")
-                if get_telegram_bot_id_tool:
-                    try:
-                        telegram_bot_id = await get_telegram_bot_id_tool.ainvoke({
-                            "telegram_bot_token": telegram_token,
-                            "telegram_api_id": int(telegram_api_id) if telegram_api_id is not None else 0, # Ensure int conversion
-                            "telegram_api_hash": telegram_api_hash
-                        })
-                        logger.info(f"Fetched Telegram Bot ID for agent '{agent_name}': {telegram_bot_id}")
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch Telegram Bot ID for agent '{agent_name}': {e}", exc_info=True)
-            
-        except Exception as e:
-            logger.error(f"Critical error during tool loading/wrapping for agent '{agent_name}': {e}", exc_info=True)
+        else:
+            logger.warning(f"No raw tools fetched for agent '{agent_name}'. Agent will operate without tools.")
+            # Ensure mcp_client.tools is an empty dict if no tools were fetched
             if not hasattr(mcp_client, 'tools'):
                 mcp_client.tools = {}
-            agent_tools_final = [] 
+
 
         logger.info(f"🔧 Loaded {len(agent_tools_final)} tools for agent '{agent_name}'. Tools found: {[t.name for t in agent_tools_final]}.")
         logger.info(f"Final number of tools obtained for agent '{agent_name}': {len(agent_tools_final)}")
@@ -463,7 +458,7 @@ class AgentManager:
             examples_str = json.dumps(agent_message_examples, indent=2)
             system_prompt = f"{system_prompt}\n\nMessage Examples:\n{examples_str}" 
 
-        logger.info(f"Using AGENT_SYSTEM_PROMPT for agent '{agent_name}'.")
+        logger.info(f"Using AGENT_SYSTEM_PROMPT for agent '{agent_name}'.") 
 
         agent_executor = await create_custom_tool_agent(llm, agent_tools_final, system_prompt, agent_name)
 

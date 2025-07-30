@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Optional, List, Tuple, Any
 
-from bot.models.agent_config import AgentConfig, AgentSecrets, Settings
+from models.agent_config import AgentConfig, AgentSecrets, Settings
 
 logger = logging.getLogger(__name__)
 

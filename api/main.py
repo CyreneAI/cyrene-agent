@@ -1,4 +1,3 @@
-import os
 import logging
 import json 
 import uuid 
@@ -10,8 +9,8 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
-from bot.models.agent_config import AgentConfig, AgentSecrets, Settings 
-from bot.core.agent_manager import AgentManager 
+from models.agent_config import AgentConfig, AgentSecrets, Settings 
+from core.agent_manager import AgentManager 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 
@@ -38,7 +37,7 @@ LOCAL_MODE = "false"
 logger.info(f"Running in LOCAL_MODE: {LOCAL_MODE}")
 
 # Initialize AgentManager instance globally
-DB_PATH = "agents.db"
+DB_PATH = "/app/data/agents.db"
 agent_manager_instance = AgentManager(DB_PATH)
 
 
