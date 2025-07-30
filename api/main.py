@@ -1,20 +1,17 @@
 import os
-import sys
-import asyncio
 import logging
 import json 
+import uuid 
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationError
 
-# Import from new modules
-from models.agent_config import AgentConfig
-from db import sqlite_manager
-from core import agent_manager
-from prompts import AGENT_SYSTEM_PROMPT
+from bot.models.agent_config import AgentConfig, AgentSecrets, Settings 
+from bot.core.agent_manager import AgentManager 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 
 
@@ -22,13 +19,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 load_dotenv()
 
 # --------- Logging Setup ---------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --------- Pydantic Model for Discord Message Payload ---------
@@ -40,11 +31,16 @@ class ReceiveDiscordMessageRequest(BaseModel):
     message_id: str
     timestamp: str
     guild_id: Optional[str] = None
-    bot_id: str # The ID of the bot that received the message
+    bot_id: str
 
 # --------- Determine Local or Cluster Mode ---------
-LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
+LOCAL_MODE = "false"
 logger.info(f"Running in LOCAL_MODE: {LOCAL_MODE}")
+
+# Initialize AgentManager instance globally
+DB_PATH = "agents.db"
+agent_manager_instance = AgentManager(DB_PATH)
+
 
 # --------- FastAPI Lifespan Context Manager ---------
 @asynccontextmanager
@@ -52,78 +48,26 @@ async def lifespan(app: FastAPI):
     """
     FastAPI lifespan context manager for initializing and cleaning up resources.
     Initializes the SQLite database and agents.
-    No global MCP client for webhooks; agents handle their own platform replies.
     """
     logger.info("Agent app startup: Initializing global resources...")
     
-    # Initialize SQLite Manager instance
-    db_path = os.getenv("SQLITE_DB_PATH", "/app/data/agents.db")
-    app.state.db_manager = sqlite_manager.SQLiteManager(db_path) # Instantiate the class
-    # The database initialization (init_db) is now handled automatically within the SQLiteManager's __init__
-    logger.info(f"SQLite database '{db_path}' initialized by SQLiteManager.")
+    app.state.db_manager = agent_manager_instance.db_manager 
+    logger.info(f"SQLite database '{DB_PATH}' initialized by SQLiteManager.")
 
-    # --- Initialize or re-initialize agents ---
-    # Agents will create their own MCPClient instances internally based on their secrets.
-    existing_agents = await app.state.db_manager.get_all_agent_configs() 
-    
-    # If no agents exist, create a default agent (Streamlit-only)
-    if not existing_agents:
-        default_agent_config = AgentConfig(
-            name="DefaultBot",
-            bio="A general-purpose AI assistant for basic queries, available only on Streamlit.",
-            persona="helpful and concise",
-            secrets={"groq_api_key": os.getenv("GROQ_API_KEY")} 
-        )
-        try:
-            default_agent_id = await app.state.db_manager.save_agent_config(default_agent_config)
-            default_agent_config.id = default_agent_id
-            
-            default_executor, default_agent_mcp_client, discord_bot_id, telegram_bot_id = \
-                await agent_manager.create_dynamic_agent_instance(default_agent_config, LOCAL_MODE)
-            
-            # Store all relevant info in the manager's cache
-            agent_manager.add_initialized_agent(
-                default_agent_id, 
-                default_agent_config.name, 
-                default_executor, 
-                default_agent_mcp_client,
-                discord_bot_id=discord_bot_id,
-                telegram_bot_id=telegram_bot_id
-            )
-            logger.info("Default agent 'DefaultBot' initialized and saved to DB (Streamlit-only).")
-        except Exception as e:
-            logger.error(f"Failed to initialize and save default agent: {e}", exc_info=True)
-    else:
-        # Re-initialize existing agents from DB
-        for config in existing_agents:
-            try:
-                executor, agent_mcp_client, discord_bot_id, telegram_bot_id = \
-                    await agent_manager.create_dynamic_agent_instance(config, LOCAL_MODE)
-                
-                # Store all relevant info in the manager's cache
-                agent_manager.add_initialized_agent(
-                    config.id, 
-                    config.name, 
-                    executor, 
-                    agent_mcp_client,
-                    discord_bot_id=discord_bot_id, 
-                    telegram_bot_id=telegram_bot_id
-                )
-            except Exception as e:
-                logger.error(f"Failed to re-initialize agent '{config.name}' (ID: {config.id}): {e}", exc_info=True)
+    try:
+        await agent_manager_instance.initialize_all_agents_from_db(LOCAL_MODE)
+    except Exception as e:
+        logger.error(f"Failed to initialize agents on startup: {e}", exc_info=True)
 
     logger.info("Agent app startup complete. Agent is ready.")
     yield
     
-    # --- Shutdown resources ---
     logger.info("Agent app shutdown.")
-    agent_manager.clear_initialized_agents_cache()
-    # The close method on SQLiteManager is now a no-op but calling it is harmless
+    await agent_manager_instance.shutdown_all_agents()
     app.state.db_manager.close() 
     logger.info("SQLite database connection closed.")
 
-# --------- Main FastAPI Application Instance ---------
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(lifespan=lifespan, debug=True)
 
 # --------- FastAPI Endpoints ---------
 
@@ -132,26 +76,62 @@ async def read_root():
     return {"message": "Welcome to the Multi-Agent Bot API!"}
 
 @app.post("/agents/create", response_model=AgentConfig, status_code=status.HTTP_201_CREATED)
-async def create_agent(agent_config: AgentConfig):
+async def create_agent(agent_config_data: Dict[str, Any]): 
     try:
-        agent_id = await app.state.db_manager.save_agent_config(agent_config) # Await the async method
-        agent_config.id = agent_id
+        settings_data = agent_config_data.get("settings", {})
+        secrets_from_json = settings_data.get("secrets", {})
+        voice_settings = settings_data.get("voice", {})
 
-        executor, mcp_client, discord_bot_id, telegram_bot_id = \
-            await agent_manager.create_dynamic_agent_instance(agent_config, LOCAL_MODE)
-        
-        # Store all relevant info in the manager's cache
-        agent_manager.add_initialized_agent(
-            agent_id, 
-            agent_config.name, 
-            executor, 
-            mcp_client,
-            discord_bot_id=discord_bot_id, 
-            telegram_bot_id=telegram_bot_id
+        # --- SIMPLIFIED SECRET PARSING ---
+        # Directly pass the secrets_from_json dict to AgentSecrets Pydantic model
+        # Pydantic will handle validation and mapping to the correct fields.
+        agent_secrets_instance = AgentSecrets(**secrets_from_json)
+        logger.debug(f"[main.py] Parsed AgentSecrets: {agent_secrets_instance.model_dump_json(exclude_none=True)}")
+
+        # Create Settings instance
+        settings_instance = Settings(
+            model=settings_data.get("model", "llama3-8b-8192"),
+            temperature=settings_data.get("temperature", 0.7),
+            maxTokens=settings_data.get("maxTokens", 8192),
+            secrets=agent_secrets_instance,
+            voice=voice_settings if voice_settings else None
         )
 
+        # Create AgentConfig object
+        agent_config = AgentConfig(
+            id=str(uuid.uuid4()), 
+            name=agent_config_data.get("name", "NewBot"),
+            modelProvider=agent_config_data.get("modelProvider", "groq"), 
+            settings=settings_instance, 
+            system=agent_config_data.get("system", ""), # Frontend sends 'system'
+            bio=agent_config_data.get("bio", []), 
+            lore=agent_config_data.get("lore", []), 
+            knowledge=agent_config_data.get("knowledge", []), 
+            messageExamples=agent_config_data.get("messageExamples"),
+            style=agent_config_data.get("style")
+        )
+
+        # Save config to DB first
+        agent_id = await app.state.db_manager.save_agent_config(agent_config)
+        agent_config.id = agent_id
+
+        # Dynamically create and initialize the agent instance and add it to the manager's cache
+        executor, mcp_client, discord_bot_id, telegram_bot_id = \
+            await agent_manager_instance.create_dynamic_agent_instance(agent_config, LOCAL_MODE)
+        
+        agent_manager_instance.add_initialized_agent(
+            agent_config.id,
+            agent_config.name,
+            executor,
+            mcp_client,
+            discord_bot_id=discord_bot_id,
+            telegram_bot_id=telegram_bot_id
+        )
+        logger.info(f"Agent '{agent_config.name}' (ID: {agent_config.id}) created and initialized.")
+        
         return agent_config
     except ValidationError as e:
+        logger.error(f"Validation Error creating agent: {e.errors()}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid agent configuration: {e.errors()}")
     except Exception as e:
         logger.error(f"Error creating agent: {e}", exc_info=True)
@@ -166,33 +146,66 @@ async def list_agents():
         logger.error(f"Error listing agents: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list agents: {e}")
 
+@app.delete("/agents/{agent_id}", status_code=status.HTTP_200_OK)
+async def delete_agent(agent_id: str):
+    """
+    Endpoint for deleting an agent.
+    """
+    agent_info = agent_manager_instance.get_initialized_agent(agent_id)
+    if not agent_info:
+        agent_config_from_db = await app.state.db_manager.get_agent_config(agent_id)
+        if not agent_config_from_db:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent with ID {agent_id} not found.")
+
+    try:
+        await agent_manager_instance.shutdown_specific_agent(agent_id)
+        await app.state.db_manager.delete_agent_config(agent_id)
+
+        return {"message": f"Agent '{agent_id}' deleted successfully."}
+    except Exception as e:
+        logger.error(f"Failed to delete agent '{agent_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete agent: {e}")
+
+
+# --------- Streamlit Chat (Frontend) ---------
+
 @app.post("/agents/{agent_id}/chat")
 async def chat_with_agent(agent_id: str, message: Dict[str, str]):
     user_message = message.get("message")
     if not user_message:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message content is required.")
 
-    agent_info = agent_manager.get_initialized_agent(agent_id)
+    agent_info = agent_manager_instance.get_initialized_agent(agent_id)
+    
     if not agent_info:
         agent_config = await app.state.db_manager.get_agent_config(agent_id)
         if not agent_config:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent with ID '{agent_id}' not found.")
         
-        executor, agent_mcp_client, discord_bot_id, telegram_bot_id = \
-            await agent_manager.create_dynamic_agent_instance(agent_config, LOCAL_MODE)
-        
-        agent_manager.add_initialized_agent(
-            agent_id, 
-            agent_config.name, 
-            executor, 
-            agent_mcp_client,
-            discord_bot_id=discord_bot_id,
-            telegram_bot_id=telegram_bot_id 
-        )
-        agent_info = agent_manager.get_initialized_agent(agent_id)
-    
-    agent_executor = agent_info["executor"]
-    # For Streamlit chat, the agent's internal logic will use its own tools.
+        # Attempt to re-initialize and add to cache
+        try:
+            executor, mcp_client, discord_bot_id, telegram_bot_id = \
+                await agent_manager_instance.create_dynamic_agent_instance(agent_config, LOCAL_MODE)
+            
+            # ADDED: Add the newly created agent to the manager's cache
+            agent_manager_instance.add_initialized_agent(
+                agent_config.id,
+                agent_config.name,
+                executor,
+                mcp_client,
+                discord_bot_id=discord_bot_id,
+                telegram_bot_id=telegram_bot_id
+            )
+            agent_info = agent_manager_instance.get_initialized_agent(agent_id) # Now it should be found
+            logger.info(f"Agent '{agent_config.name}' (ID: {agent_config.id}) re-initialized and added to cache for chat.")
+        except Exception as e:
+            logger.error(f"Failed to re-initialize agent '{agent_id}' during chat request: {e}", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to initialize agent '{agent_id}' for chat: {e}")
+
+        if not agent_info: # This check might still be needed if add_initialized_agent itself fails somehow
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to retrieve agent '{agent_id}' from cache after re-initialization attempt.")
+
+    agent_executor = agent_info["executor"] 
 
     logger.info(f"Invoking agent '{agent_id}' with message: {user_message}")
     logger.info(f"DEBUG: User message being passed to agent.ainvoke: '{user_message}'")
@@ -231,13 +244,15 @@ async def chat_with_agent(agent_id: str, message: Dict[str, str]):
         logger.error(f"Error chatting with agent '{agent_id}': {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error during agent interaction: {e}")
 
+
+# --------- Telegram Webhook ----------
+
 @app.post("/telegram/webhook")
 async def tg_webhook(request: Request):
     try:
         data = await request.json()
         logger.info(f"Received Telegram webhook data: {json.dumps(data, indent=2)}")
 
-        # Attempt to get message data, handling potential absence gracefully
         message = data.get("message")
         if not message:
             logger.debug("Webhook data does not contain a 'message' object. Assuming it's a forwarded payload.")
@@ -247,7 +262,6 @@ async def tg_webhook(request: Request):
             message_id = data.get("message_id")
             user_name = data.get("user_name")
         else:
-            # This handles raw Telegram webhooks (which should go to MCP first)
             logger.debug("Webhook data contains a 'message' object.")
             chat_id = message.get("chat", {}).get("id")
             user_id = message.get("from", {}).get("id")
@@ -255,7 +269,6 @@ async def tg_webhook(request: Request):
             message_id = message.get("message_id")
             user_name = message.get("from", {}).get("username") or message.get("from", {}).get("first_name") or str(user_id)
         
-        # The bot_id is expected to be at the top level for forwarded webhooks from MCP
         incoming_bot_id = data.get('bot_id') 
 
         if not all([chat_id, user_id, user_message, incoming_bot_id]):
@@ -264,28 +277,25 @@ async def tg_webhook(request: Request):
 
         logger.info(f"Received Telegram message from user {user_id} in chat {chat_id} (via bot {incoming_bot_id}): {user_message}")
 
-        # --- Agent Selection Logic for Telegram Webhook ---
         selected_agent_info = None
         logger.debug(f"Attempting to find agent for incoming_bot_id: {incoming_bot_id}")
-        all_cached_telegram_ids = {name: info.get('telegram_bot_id') for name, info in agent_manager._initialized_agents.items()}
+        all_cached_telegram_ids = {name: info.get('telegram_bot_id') for name, info in agent_manager_instance.get_all_initialized_agents().items()}
         logger.debug(f"Currently cached Telegram bot IDs: {all_cached_telegram_ids}")
 
-        for agent_id, agent_info in agent_manager._initialized_agents.items():
+        for agent_id, agent_info in agent_manager_instance.get_all_initialized_agents().items():
             cached_telegram_bot_id = agent_info.get("telegram_bot_id")
             logger.debug(f"Checking agent '{agent_info.get('name')}' (ID: {agent_id}) with cached Telegram Bot ID: {cached_telegram_bot_id}. Comparing to incoming bot_id: {incoming_bot_id}")
             
-            # DefaultBot should NOT reply to Telegram
             if agent_info["name"] == "DefaultBot":
                 continue 
             
-            # Check if this agent has the Telegram sending tool AND its configured bot_id matches the incoming bot_id
-            if agent_info["mcp_client"].tools.get("send_message_telegram") and cached_telegram_bot_id == incoming_bot_id:
+            if agent_info["mcp_client"].tools.get("send_message_telegram") and str(cached_telegram_bot_id) == str(incoming_bot_id): # Ensure string comparison
                 selected_agent_info = agent_info
                 logger.info(f"Selected agent '{agent_info['name']}' (ID: {agent_id}) for Telegram webhook based on bot ID match.")
-                break # Found a suitable agent, use it
+                break 
 
         if not selected_agent_info:
-            logger.warning(f"No suitable agent found with Telegram API keys matching bot ID '{incoming_bot_id}' to reply to this message. Message ignored. Available agents' Telegram IDs: {[info.get('telegram_bot_id') for info in agent_manager._initialized_agents.values() if info.get('telegram_bot_id')]}")
+            logger.warning(f"No suitable agent found with Telegram API keys matching bot ID '{incoming_bot_id}' to reply to this message. Message ignored. Available agents' Telegram IDs: {[info.get('telegram_bot_id') for info in agent_manager_instance.get_all_initialized_agents().values() if info.get('telegram_bot_id')]}")
             return {"status": "ignored", "detail": f"No agent configured for Telegram replies via bot ID {incoming_bot_id}."}
         
         agent_executor = selected_agent_info["executor"]
@@ -305,7 +315,6 @@ async def tg_webhook(request: Request):
 
         logger.info(f"Agent '{selected_agent_info['name']}' generated Telegram reply: {final_message_content}")
 
-        # Use the selected agent's MCP client for sending the reply
         telegram_tool = agent_mcp_client.tools.get("send_message_telegram")
         if telegram_tool:
             logger.info(f"Using agent '{selected_agent_info['name']}'s own Telegram tool to send reply.")
@@ -331,25 +340,21 @@ async def receive_discord_message(payload: ReceiveDiscordMessageRequest):
         author_id = payload.author_id
         author_name = payload.author_name
         message_content = payload.content
-        incoming_bot_id = payload.bot_id # Get the bot ID from the incoming payload
+        incoming_bot_id = payload.bot_id 
 
         logger.info(f"Received Discord message from {author_name} ({author_id}) via bot {incoming_bot_id} in channel {channel_id}: {message_content}")
 
-        # --- Agent Selection Logic for Discord Webhook ---
         selected_agent_info = None
-        # Iterate through all initialized agents to find the one configured for this Discord bot
-        for agent_id, agent_info in agent_manager._initialized_agents.items():
-            # DefaultBot should NOT reply to Discord messages
+        for agent_id, agent_info in agent_manager_instance.get_all_initialized_agents().items():
             if agent_info["name"] == "DefaultBot":
                 continue 
             
-            # Check if this agent has the Discord sending tool AND its configured bot_id matches the incoming bot_id
             agent_discord_bot_id = agent_info.get("discord_bot_id")
             
-            if agent_info["mcp_client"].tools.get("send_message") and agent_discord_bot_id == incoming_bot_id:
+            if agent_info["mcp_client"].tools.get("send_message") and str(agent_discord_bot_id) == str(incoming_bot_id): # Ensure string comparison
                 selected_agent_info = agent_info
                 logger.info(f"Selected agent '{agent_info['name']}' (ID: {agent_id}) for Discord webhook based on bot ID match.")
-                break # Found the specific agent, break loop
+                break 
 
         if not selected_agent_info:
             logger.warning(f"No suitable agent found with Discord API keys matching bot ID '{incoming_bot_id}' to reply to this message. Message ignored.")
@@ -372,7 +377,6 @@ async def receive_discord_message(payload: ReceiveDiscordMessageRequest):
 
         logger.info(f"Agent '{selected_agent_info['name']}' generated Discord reply: {final_message_content}")
 
-        # Use the selected agent's MCP client for sending the reply
         discord_tool = agent_mcp_client.tools.get("send_message")
         if discord_tool:
             logger.info(f"Using agent '{selected_agent_info['name']}'s own Discord tool to send reply.")
@@ -392,4 +396,3 @@ async def receive_discord_message(payload: ReceiveDiscordMessageRequest):
     except Exception as e:
         logger.error(f"Error processing received Discord message: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-

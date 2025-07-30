@@ -8,3 +8,6 @@ langchain
 langchain-community
 pydantic
 langchain-core
+langchain_ollama
+langchain_openai
+langchain_google_genai
