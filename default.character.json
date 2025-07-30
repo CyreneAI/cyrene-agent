@@ -6,7 +6,7 @@
         "temperature": 0.7,
         "maxTokens": 50000,
         "secrets": {
-            "anthropic_api_key": "roj-pfZ0MD3bLDkilm8JFjUYV53S_99piDaLaCDsWrmCevRh1UJpq9-SiMWzRMpvHALNtdWSizTD7DT3BlbkFJVL3kBnU7MxkcFCvP8_s_9G6qlEnNmAfTiZhkWsj6-uy90w47HCH2kNwf3oCFn5XQcyYVRYdv0A"
+            "anthropic_api_key": "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"
         },
         "voice": {
             "model": "en_US-hfc_female-medium"

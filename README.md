@@ -1,5 +1,5 @@
-````markdown
-# 🧠 Cyrene Agent (agent-api)
+
+## 🧠 Cyrene Agent (agent-api)
 
 This repository contains the core agent-api service of the Multi-Agent Bot system. It acts as the central brain, responsible for managing AI agents, orchestrating their interactions with Large Language Models (LLMs) and various tools, and handling communication with external platforms via specialized MCP (Multi-Channel Platform) servers.
 
@@ -17,32 +17,6 @@ This repository contains the core agent-api service of the Multi-Agent Bot syste
 
 The cyrene-agent (bot-api) is the core backend service. It exposes RESTful endpoints for the frontend (agent-UI) to manage agents and for platform MCPs to send incoming messages. It then leverages MultiServerMCPClient to interact with all other specialized MCP services (e.g., web-mcp, finance-mcp, rag-mcp, telegram-mcp, discord-mcp) to execute tools.
 
-```mermaid
-graph TD
-    Agent_UI -->|HTTP API| agent_api
-    Platform_MCPs -->|HTTP Webhook/API| agent_api
-    agent_api -->|HTTP API| Specialized_MCPs
-    agent_api -- SQLite --> Internal_DB[SQLite Database]
-
-    subgraph This Repository (cyrene-agent)
-        agent_api
-        agent_core[agent/core/agent_manager.py]
-        agent_db[cyrene-agent/db/sqlite_manager.py]
-        langgraph_agents[agent/langgraph_agents/custom_tool_agent.py]
-        models[agent/models/agent_config.py]
-        prompts[prompts.py]
-        cyrene-agent --> agent_core
-        cyrene-agent --> agent_db
-        cyrene-agent --> langgraph_agents
-        cyrene-agent --> models
-        cyrene-agent --> prompts
-    end
-
-    subgraph External Services
-        Platform_MCPs[Telegram/Discord MCPs]
-        Specialized_MCPs[Web/Finance/RAG MCPs]
-    end
-````
 
 ## 🚀 Getting Started
 
