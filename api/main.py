@@ -33,7 +33,7 @@ class ReceiveDiscordMessageRequest(BaseModel):
     bot_id: str
 
 # --------- Determine Local or Cluster Mode ---------
-LOCAL_MODE = "false"
+LOCAL_MODE = False
 logger.info(f"Running in LOCAL_MODE: {LOCAL_MODE}")
 
 # Initialize AgentManager instance globally

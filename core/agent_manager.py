@@ -306,15 +306,18 @@ class AgentManager:
 
         # --- MCP Server Configuration (using Docker Compose service names for non-local) ---
         agent_mcp_config = {
-            "multi_search": {"url": "http://localhost:9000/mcp/", "transport": "streamable_http"}, 
+            "web_search": {"url": "http://localhost:9000/mcp/", "transport": "streamable_http"}, 
             "finance": {"url": "http://localhost:9001/mcp/", "transport": "streamable_http"}, 
             "rag": {"url": "http://localhost:9002/mcp/", "transport": "streamable_http"}, 
         }
         
         if not local_mode:
-            agent_mcp_config["multi_search"]["url"] = "http://web-mcp:9000/mcp/"
-            agent_mcp_config["finance"]["url"] = "http://finance-mcp:9000/mcp/"
-            agent_mcp_config["rag"]["url"] = "http://rag-mcp:9000/mcp/"
+            # CORRECTED URLs for Docker Compose based on docker-compose.yml
+            agent_mcp_config["web_search"]["url"] = "http://web-mcp:9000/mcp/"
+            agent_mcp_config["finance"]["url"] = "http://finance-mcp:9001/mcp/" 
+            agent_mcp_config["rag"]["url"] = "http://rag-mcp:9002/mcp/"       
+            # Note: Discord and Telegram MCPs are only added if their secrets are provided
+            # Their URLs will be set correctly below if they are enabled.
 
 
         discord_bot_id = None
@@ -326,7 +329,8 @@ class AgentManager:
             if local_mode:
                 agent_mcp_config["discord"] = {"url": "http://localhost:9004/mcp/", "transport": "streamable_http"}
             else:
-                agent_mcp_config["discord"] = {"url": "http://discord-mcp:9000/mcp/", "transport": "streamable_http"}
+                # Corrected URL for Discord MCP in Docker Compose
+                agent_mcp_config["discord"] = {"url": "http://discord-mcp:9004/mcp/", "transport": "streamable_http"}
             logger.info(f"Agent '{agent_name}' will include Discord tools.")
         else:
             logger.info(f"Agent '{agent_name}' does not have Discord bot token. Discord tools will NOT be enabled.")
@@ -344,7 +348,8 @@ class AgentManager:
             if local_mode:
                 agent_mcp_config["telegram"] = {"url": "http://localhost:9003/mcp/", "transport": "streamable_http"}
             else:
-                agent_mcp_config["telegram"] = {"url": "http://telegram-mcp:9000/mcp/", "transport": "streamable_http"}
+                # Corrected URL for Telegram MCP in Docker Compose
+                agent_mcp_config["telegram"] = {"url": "http://telegram-mcp:9003/mcp/", "transport": "streamable_http"}
             logger.info(f"Agent '{agent_name}' will include Telegram tools.")
         else:
             if telegram_token:
@@ -360,7 +365,7 @@ class AgentManager:
         logger.info(f"Attempting to load tools for agent '{agent_name}' from MCP servers: {list(agent_mcp_config.keys())}...")
         
         # --- RETRY MECHANISM ---
-        max_attempts = 12  
+        max_attempts = 12 
         base_delay = 2    
         for attempt in range(1, max_attempts + 1): 
             try:
@@ -434,7 +439,6 @@ class AgentManager:
                     mcp_client.tools[tool_item.name] = tool_item
         else:
             logger.warning(f"No raw tools fetched for agent '{agent_name}'. Agent will operate without tools.")
-            # Ensure mcp_client.tools is an empty dict if no tools were fetched
             if not hasattr(mcp_client, 'tools'):
                 mcp_client.tools = {}
 
