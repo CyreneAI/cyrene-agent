@@ -26,7 +26,7 @@ jobs:
 
       - name: Decode and write default.character.json from secret
         run: |
-          echo "${{ secrets.DEFAULT_CHARACTER_JSON_B64 }}" | base64 --decode > default.character.json
+          echo "${{ secrets.DEFAULT_CHARACTER_JSON }}" | base64 --decode > default.character.json
 
       - name: Print JSON (debug only)
         run: cat default.charater.json
