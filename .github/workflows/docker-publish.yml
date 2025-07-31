@@ -37,9 +37,6 @@ jobs:
         run: |
           echo "${{ secrets.DEFAULT_CHARACTER_JSON }}" | base64 --decode > default.character.json
 
-      - name: Print JSON (debug only)
-        run: cat default.character.json
-
       - name: Build & push Docker image
         uses: docker/build-push-action@v4
         with:
