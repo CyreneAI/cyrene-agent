@@ -24,6 +24,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_CR_PAT }}
 
+      - name: Check if secret is present
+        run: |
+          if [ -z "${{ secrets.DEFAULT_CHARACTER_JSON }}" ]; then
+            echo "❌ DEFAULT_CHARACTER_JSON is not set!"
+            exit 1
+          else
+            echo "✅ Secret is set."
+          fi
+
       - name: Decode and write default.character.json from secret
         run: |
           echo "${{ secrets.DEFAULT_CHARACTER_JSON }}" | base64 --decode > default.character.json
