@@ -26,7 +26,10 @@ jobs:
 
       - name: Create default.charater.json file from secret
         run: |
-          echo "${{ secrets.DEFAULT_CHARACTER_JSON }}" > default.charater.json
+          printf '%s' "${{ secrets.DEFAULT_CHARACTER_JSON }}" > default.charater.json
+      
+      - name: Print JSON (debug only)
+        run: cat default.charater.json
 
       - name: Build & push Docker image
         uses: docker/build-push-action@v4
