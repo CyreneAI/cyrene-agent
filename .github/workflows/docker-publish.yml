@@ -17,6 +17,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Create default.charater.json file from secret
+        run: |
+          echo "${{ secrets.DEFAULT_CHARACTER_JSON }}" > default.charater.json
+
       - name: Log in to GHCR (pull & push)
         uses: docker/login-action@v2
         with:
