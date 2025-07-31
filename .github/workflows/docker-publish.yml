@@ -24,10 +24,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GHCR_CR_PAT }}
 
-      - name: Create default.charater.json file from secret
+      - name: Decode and write default.character.json from secret
         run: |
-          printf '%s' "${{ secrets.DEFAULT_CHARACTER_JSON }}" > default.charater.json
-      
+          echo "${{ secrets.DEFAULT_CHARACTER_JSON_B64 }}" | base64 --decode > default.character.json
+
       - name: Print JSON (debug only)
         run: cat default.charater.json
 
